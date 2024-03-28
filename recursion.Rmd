@@ -1,0 +1,133 @@
+---
+title: "Recursion To Identify All Cancer Drug Relationships"
+output: html_document
+---
+The Hemonc concept_relationship table contains relationships between hemonc concepts.
+The relationships in the table only tie a child concept to its immediate parents.
+
+However, we often want to be able to tie concepts to the parents of their parents etc.
+
+This is particularly useful for drugs since in this way we can easily tell which drugs are chemotherapeutic.
+This code perform recursion on the relationships table to tie them with all their direct and indirect parent concepts.
+
+# Load Packages
+```{R loadlib, echo=T, results='hide', message=F, warning=F}
+library(dplyr)
+```
+```{R echo=F}
+library(lemon) #import library to nicely format dataframes
+```
+# Load File containing the tables
+```{R results="hide"}
+# Define data frames
+concept_relationship <- read.csv("./data/concept_relationship.csv") 
+concept <- read.csv("./data/concept.csv")
+```
+# Data Preprocessing & Cleaning
+```{R results='hide', message=F, warning=F}
+# Convert string NULLs to NA and store the results
+concept_relationship <- concept_relationship %>% 
+            mutate_if(is.character, list(~na_if(., "NULL")))
+concept <- concept %>% 
+            mutate_if(is.character, list(~na_if(., "NULL")))
+
+# Ensure concept codes are casted as integers
+concept_relationship$concept_code_1 <- as.integer(concept_relationship$concept_code_1)
+concept_relationship$concept_code_2 <- as.integer(concept_relationship$concept_code_2)
+concept_relationship$concept_code_2 <- as.integer(concept_relationship$concept_code_2)
+concept_relationship$invalid_reason <- as.integer(concept_relationship$invalid_reason)
+concept$concept_code <- as.integer(concept$concept_code)
+```
+# Create Auxiliary tables
+```{R}
+# Filter concept_relationship to get relevant data
+data <- concept_relationship %>%
+  filter(relationship_id == "Is a" & is.na(invalid_reason)) %>%
+  left_join(concept, by = c("concept_code_1" = "concept_code")) %>%
+  left_join(concept, by = c("concept_code_2" = "concept_code")) %>%
+  rename(concept_name_1 = concept_name.x) %>%
+  rename(concept_name_2 = concept_name.y) %>%
+  select(concept_code_1, vocabulary_id_1, concept_name_1,
+         relationship_id, concept_code_2, vocabulary_id_2, concept_name_2)
+
+# Filter concept to get drugs
+drugs <- concept %>%
+  filter(domain_id == "drug" & !(concept_class_id %in% c("Component Class", "Route"))) %>%
+  select(concept_code, vocabulary_id, concept_name)
+
+# Create bottom_child_nodes
+bottom_child_nodes <- data.frame(
+  concept_code_1 = NA,
+  vocabulary_id_1 = NA,
+  concept_name_1 = NA,
+  relationship = 'Is Start Node',
+  concept_code_2 = drugs$concept_code,
+  vocabulary_id_2 = drugs$vocabulary_id,
+  concept_name_2 = drugs$concept_name
+)
+```
+# Perform Recursion
+```{R}
+find_parent <- function(node, relationships_df){
+    # Find all parents of the given node
+    parents <- relationships_df[relationships_df$concept_code_1 == node$concept_code_2,]
+
+    # If no parents found, return an empty dataframe
+    if (nrow(parents) == 0) {
+    return(data.frame())
+    }
+
+    # Recursively find all the related nodes by recursing over the parents of each parent etc.
+    related <- data.frame()
+    for (i in 1:nrow(parents)) {
+        parent <- parents[i,]
+        parent_nodes <- find_parent(parent, relationships_df)
+        if (!any(duplicated(rbind(related,parent_nodes)))) {
+            # Append the new row to the dataframe
+            related <- rbind(related,parent_nodes)
+        }
+    }
+
+    # Combine all the identified related nodes
+    result <- rbind(related, parents)
+
+    # Set all child values in the datframe to the original node 
+    result$concept_code_1 = node$concept_code_2
+    result$vocabulary_id_1 = node$vocabulary_id_2
+    result$concept_name_1 = node$concept_name_2
+
+    return(result)
+}
+```
+# Test function on a single drug node
+```{R render=lemon_print}
+child <- bottom_child_nodes[1,]
+related_nodes <- find_parent(child, data)
+print("Related Nodes:")
+head(related_nodes)
+```
+# Apply function across all drug nodes
+```{R}
+# Apply recursive function for all bottom child nodes
+recursion_results = lapply(1:nrow(bottom_child_nodes), function(i) find_parent(bottom_child_nodes[i,],data))
+
+# Filter out empty data frames(some drugs are only mapped to other drugs or do not pertain to other broader classes)
+recursion_results <- recursion_results[sapply(recursion_results, function(x) !is.null(dim(x)))]
+
+# Combine the list of dataframes into a single dataframe
+if (length(recursion_results) > 0) {
+  recursion_results <- do.call(rbind, recursion_results)
+} else {
+  recursion_results <- data.frame()
+}
+```
+# Display Results
+```{R render=lemon_print}
+head(recursion_results)
+```
+# Example usage: Find All 'Cytotoxic chemotherapeutic' drugs
+```{R render=lemon_print}
+cytotoxic_chemotheraupetic_drugs <- recursion_results %>%
+    filter(concept_name_2 == "Cytotoxic chemotherapeutic")
+head(cytotoxic_chemotheraupetic_drugs)
+```
